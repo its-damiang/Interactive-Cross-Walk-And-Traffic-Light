@@ -1,72 +1,201 @@
+import RPi.GPIO as GPIO
 import time
 
-GREEN = "GL"
-YELLOW = "YL"
-RED = "RL"
+GPIO.setmode(GPIO.BCM)
+GPIO.setwarnings(False)
 
-crosswalk_button = False
-emergency_vehicle = False
-night_mode = False
+# --------------------
+# PIN SETUP
+# --------------------
+GREEN_LED = 17
+YELLOW_LED = 27
+RED_LED = 22
+
+PED_BUTTON = 5
+EMERGENCY_BUTTON = 6
+NIGHT_BUTTON = 13
+
+GPIO.setup(GREEN_LED, GPIO.OUT)
+GPIO.setup(YELLOW_LED, GPIO.OUT)
+GPIO.setup(RED_LED, GPIO.OUT)
+
+GPIO.setup(PED_BUTTON, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+GPIO.setup(EMERGENCY_BUTTON, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+GPIO.setup(NIGHT_BUTTON, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+
+# --------------------
+# STATES
+# --------------------
+GREEN = "GREEN"
+YELLOW = "YELLOW"
+RED = "RED"
 
 state = GREEN
+night_mode = False
 state_start_time = time.time()
+night_button_last = 0
 
-def read_inputs():
-    global crosswalk_button, emergency_vehicle, night_mode
+def set_lights(green, yellow, red):
+    GPIO.output(GREEN_LED, green)
+    GPIO.output(YELLOW_LED, yellow)
+    GPIO.output(RED_LED, red)
 
-    print("\nPress:")
-    print("  c = crosswalk button")
-    print("  e = emergency vehicle")
-    print("  n = toggle night mode")
-    print("  Enter = no input")
-    choice = input("Input: ").strip().lower()
-
-    crosswalk_button = (choice == "c")
-    emergency_vehicle = (choice == "e")
-    if choice == "n":
-        night_mode = not night_mode
-
-def set_outputs(current_state):
+def show_state(current_state):
     if current_state == GREEN:
-        print("Cars: GREEN | Pedestrians: DON'T WALK")
+        set_lights(GPIO.HIGH, GPIO.LOW, GPIO.LOW)
+        print("Cars GO | Pedestrians DON'T WALK")
     elif current_state == YELLOW:
-        print("Cars: YELLOW | Pedestrians: DON'T WALK")
+        set_lights(GPIO.LOW, GPIO.HIGH, GPIO.LOW)
+        print("Cars GO | Pedestrians DON'T WALK")
     elif current_state == RED:
-        print("Cars: RED | Pedestrians: WALK")
+        set_lights(GPIO.LOW, GPIO.LOW, GPIO.HIGH)
+        print("Cars DON'T GO | Pedestrians CAN WALK")
 
-def update_state():
+def countdown(seconds, label):
+    for remaining in range(seconds, 0, -1):
+        if GPIO.input(EMERGENCY_BUTTON) == GPIO.HIGH:
+            return "EMERGENCY"
+        print(f"{label}: {remaining} seconds")
+        time.sleep(1)
+    return "DONE"
+
+def wait_for_button_press():
+    while True:
+        if GPIO.input(PED_BUTTON) == GPIO.HIGH:
+            time.sleep(0.2)
+            return True
+        if GPIO.input(EMERGENCY_BUTTON) == GPIO.HIGH:
+            return False
+        if GPIO.input(NIGHT_BUTTON) == GPIO.HIGH:
+            time.sleep(0.2)
+            return "NIGHT"
+        time.sleep(0.05)
+
+def toggle_night_mode():
+    global night_mode, night_button_last
+    now = time.time()
+    if GPIO.input(NIGHT_BUTTON) == GPIO.HIGH and (now - night_button_last) > 0.5:
+        night_mode = not night_mode
+        night_button_last = now
+        print(f"Night mode is now {'ON' if night_mode else 'OFF'}")
+        time.sleep(0.3)
+
+def run_normal_mode():
     global state, state_start_time
-    elapsed = time.time() - state_start_time
 
-    if emergency_vehicle:
-        state = GREEN
-        state_start_time = time.time()
-        return
+    print("\nNORMAL MODE ACTIVE")
 
-    if state == GREEN:
-        if crosswalk_button and not night_mode:
-            state = YELLOW
-            state_start_time = time.time()
-    elif state == YELLOW:
-        if elapsed >= 3:
-            state = RED
-            state_start_time = time.time()
-    elif state == RED:
-        if elapsed >= 5:
+    while not night_mode:
+        show_state(state)
+
+        if GPIO.input(EMERGENCY_BUTTON) == GPIO.HIGH:
             state = GREEN
             state_start_time = time.time()
+            print("EMERGENCY: forcing GREEN")
+            continue
 
-def main():
-    print("Custom State Machine System: Pedestrian Crosswalk and Traffic Light")
-    print("Starting in GREEN state")
+        if GPIO.input(NIGHT_BUTTON) == GPIO.HIGH:
+            toggle_night_mode()
+            if night_mode:
+                state = GREEN
+                state_start_time = time.time()
+                continue
+
+        if state == GREEN:
+            print("Green light active. Press pedestrian button to start cycle.")
+            result = wait_for_button_press()
+            if result == True:
+                state = YELLOW
+                state_start_time = time.time()
+            elif result == "NIGHT":
+                toggle_night_mode()
+                continue
+
+        elif state == YELLOW:
+            result = countdown(5, "YELLOW countdown")
+            if result == "EMERGENCY":
+                state = GREEN
+                state_start_time = time.time()
+            else:
+                state = RED
+                state_start_time = time.time()
+
+        elif state == RED:
+            result = countdown(15, "RED countdown")
+            if result == "EMERGENCY":
+                state = GREEN
+                state_start_time = time.time()
+            else:
+                state = GREEN
+                state_start_time = time.time()
+
+def run_night_mode():
+    global state, state_start_time
+
+    print("\nNIGHT MODE ACTIVE")
+
+    while night_mode:
+        show_state(state)
+
+        if GPIO.input(NIGHT_BUTTON) == GPIO.HIGH:
+            toggle_night_mode()
+            if not night_mode:
+                state = GREEN
+                state_start_time = time.time()
+                break
+
+        if GPIO.input(EMERGENCY_BUTTON) == GPIO.HIGH:
+            state = GREEN
+            state_start_time = time.time()
+            print("EMERGENCY: forcing GREEN")
+            continue
+
+        if state == GREEN:
+            print("Green light active. Press pedestrian button to start night cycle.")
+            result = wait_for_button_press()
+            if result == True:
+                state = YELLOW
+                state_start_time = time.time()
+            elif result == "NIGHT":
+                toggle_night_mode()
+
+        elif state == YELLOW:
+            result = countdown(3, "YELLOW countdown")
+            if result == "EMERGENCY":
+                state = GREEN
+                state_start_time = time.time()
+            else:
+                state = RED
+                state_start_time = time.time()
+
+        elif state == RED:
+            result = countdown(7, "RED countdown")
+            if result == "EMERGENCY":
+                state = GREEN
+                state_start_time = time.time()
+            else:
+                state = GREEN
+                state_start_time = time.time()
+
+try:
+    print("Starting traffic light state machine...")
+    print("GREEN = cars go, pedestrians don't walk")
+    print("YELLOW = cars go, pedestrians don't walk")
+    print("RED = cars don't go, pedestrians can walk")
+    print("Press NIGHT button to toggle night mode.")
+    print("Press EMERGENCY button anytime during red to force green.")
 
     while True:
-        print("\n-----------------------------------")
-        print("Current state:", state, "| Night mode:", night_mode)
-        read_inputs()
-        update_state()
-        set_outputs(state)
-        time.sleep(1)
+        if night_mode:
+            run_night_mode()
+        else:
+            run_normal_mode()
 
-if __name__ == "__main__":
-    main()
+except KeyboardInterrupt:
+    print("\nProgram stopped by user.")
+
+finally:
+    GPIO.output(GREEN_LED, GPIO.LOW)
+    GPIO.output(YELLOW_LED, GPIO.LOW)
+    GPIO.output(RED_LED, GPIO.LOW)
+    GPIO.cleanup()
