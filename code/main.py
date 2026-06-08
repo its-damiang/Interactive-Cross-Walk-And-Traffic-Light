@@ -1,11 +1,16 @@
+# AI-assisted code:
+# Used AI to help restructure this Raspberry Pi finite state machine so it starts in GREEN, stays GREEN when idle,
+# and uses proper GPIO button handling, countdown timing, and emergency override behavior.
+
 import RPi.GPIO as GPIO
 import time
+import sys
 
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
 
 # --------------------
-# PIN SETUP
+# GPIO PINS
 # --------------------
 GREEN_LED = 17
 YELLOW_LED = 27
@@ -15,6 +20,9 @@ PED_BUTTON = 5
 EMERGENCY_BUTTON = 6
 NIGHT_BUTTON = 13
 
+# --------------------
+# SETUP
+# --------------------
 GPIO.setup(GREEN_LED, GPIO.OUT)
 GPIO.setup(YELLOW_LED, GPIO.OUT)
 GPIO.setup(RED_LED, GPIO.OUT)
@@ -32,13 +40,19 @@ RED = "RED"
 
 state = GREEN
 night_mode = False
-state_start_time = time.time()
-night_button_last = 0
 
-def set_lights(green, yellow, red):
-    GPIO.output(GREEN_LED, green)
-    GPIO.output(YELLOW_LED, yellow)
-    GPIO.output(RED_LED, red)
+NORMAL_PRE_YELLOW = 5
+NORMAL_YELLOW_TO_RED = 10
+NORMAL_RED_TO_GREEN = 10
+
+NIGHT_PRE_YELLOW = 3
+NIGHT_YELLOW_TO_RED = 7
+NIGHT_RED_TO_GREEN = 7
+
+def set_lights(g, y, r):
+    GPIO.output(GREEN_LED, g)
+    GPIO.output(YELLOW_LED, y)
+    GPIO.output(RED_LED, r)
 
 def show_state(current_state):
     if current_state == GREEN:
@@ -51,151 +65,167 @@ def show_state(current_state):
         set_lights(GPIO.LOW, GPIO.LOW, GPIO.HIGH)
         print("Cars DON'T GO | Pedestrians CAN WALK")
 
-def countdown(seconds, label):
-    for remaining in range(seconds, 0, -1):
-        if GPIO.input(EMERGENCY_BUTTON) == GPIO.HIGH:
-            return "EMERGENCY"
-        print(f"{label}: {remaining} seconds")
-        time.sleep(1)
-    return "DONE"
+def emergency_pressed():
+    return GPIO.input(EMERGENCY_BUTTON) == GPIO.HIGH
 
-def wait_for_button_press():
-    while True:
-        if GPIO.input(PED_BUTTON) == GPIO.HIGH:
-            time.sleep(0.2)
-            return True
-        if GPIO.input(EMERGENCY_BUTTON) == GPIO.HIGH:
-            return False
-        if GPIO.input(NIGHT_BUTTON) == GPIO.HIGH:
-            time.sleep(0.2)
-            return "NIGHT"
+def night_pressed():
+    return GPIO.input(NIGHT_BUTTON) == GPIO.HIGH
+
+def ped_pressed():
+    return GPIO.input(PED_BUTTON) == GPIO.HIGH
+
+def wait_for_release(pin):
+    while GPIO.input(pin) == GPIO.HIGH:
         time.sleep(0.05)
 
+def print_countdown(seconds):
+    for remaining in range(seconds, 0, -1):
+        print(f"{remaining}s")
+        time.sleep(1)
+
+        if emergency_pressed():
+            return "EMERGENCY"
+
+        if night_pressed():
+            wait_for_release(NIGHT_BUTTON)
+            return "NIGHT"
+
+    return "DONE"
+
 def toggle_night_mode():
-    global night_mode, night_button_last
-    now = time.time()
-    if GPIO.input(NIGHT_BUTTON) == GPIO.HIGH and (now - night_button_last) > 0.5:
-        night_mode = not night_mode
-        night_button_last = now
-        print(f"Night mode is now {'ON' if night_mode else 'OFF'}")
-        time.sleep(0.3)
+    global night_mode
+    night_mode = not night_mode
+    print(f"Night mode {'ON' if night_mode else 'OFF'}")
+    time.sleep(0.3)
 
-def run_normal_mode():
-    global state, state_start_time
-
-    print("\nNORMAL MODE ACTIVE")
+def normal_mode():
+    global state
 
     while not night_mode:
         show_state(state)
 
-        if GPIO.input(EMERGENCY_BUTTON) == GPIO.HIGH:
+        if emergency_pressed():
             state = GREEN
-            state_start_time = time.time()
-            print("EMERGENCY: forcing GREEN")
+            print("EMERGENCY -> GREEN")
+            time.sleep(0.2)
             continue
 
-        if GPIO.input(NIGHT_BUTTON) == GPIO.HIGH:
+        if night_pressed():
+            wait_for_release(NIGHT_BUTTON)
             toggle_night_mode()
-            if night_mode:
-                state = GREEN
-                state_start_time = time.time()
-                continue
+            state = GREEN
+            continue
 
         if state == GREEN:
-            print("Green light active. Press pedestrian button to start cycle.")
-            result = wait_for_button_press()
-            if result == True:
+            if ped_pressed():
+                wait_for_release(PED_BUTTON)
+                print("Pedestrian button pressed. Waiting 5 seconds before YELLOW.")
+                result = print_countdown(NORMAL_PRE_YELLOW)
+                if result == "EMERGENCY":
+                    state = GREEN
+                    continue
+                if result == "NIGHT":
+                    toggle_night_mode()
+                    state = GREEN
+                    continue
                 state = YELLOW
-                state_start_time = time.time()
-            elif result == "NIGHT":
-                toggle_night_mode()
-                continue
+            else:
+                time.sleep(0.05)
 
         elif state == YELLOW:
-            result = countdown(5, "YELLOW countdown")
+            print("YELLOW for 10 seconds")
+            result = print_countdown(NORMAL_YELLOW_TO_RED)
             if result == "EMERGENCY":
                 state = GREEN
-                state_start_time = time.time()
+            elif result == "NIGHT":
+                toggle_night_mode()
+                state = GREEN
             else:
                 state = RED
-                state_start_time = time.time()
 
         elif state == RED:
-            result = countdown(15, "RED countdown")
+            print("RED for 10 seconds")
+            result = print_countdown(NORMAL_RED_TO_GREEN)
             if result == "EMERGENCY":
                 state = GREEN
-                state_start_time = time.time()
+            elif result == "NIGHT":
+                toggle_night_mode()
+                state = GREEN
             else:
                 state = GREEN
-                state_start_time = time.time()
 
-def run_night_mode():
-    global state, state_start_time
-
-    print("\nNIGHT MODE ACTIVE")
+def night_mode_cycle():
+    global state
 
     while night_mode:
         show_state(state)
 
-        if GPIO.input(NIGHT_BUTTON) == GPIO.HIGH:
-            toggle_night_mode()
-            if not night_mode:
-                state = GREEN
-                state_start_time = time.time()
-                break
-
-        if GPIO.input(EMERGENCY_BUTTON) == GPIO.HIGH:
+        if emergency_pressed():
             state = GREEN
-            state_start_time = time.time()
-            print("EMERGENCY: forcing GREEN")
+            print("EMERGENCY -> GREEN")
+            time.sleep(0.2)
+            continue
+
+        if night_pressed():
+            wait_for_release(NIGHT_BUTTON)
+            toggle_night_mode()
+            state = GREEN
             continue
 
         if state == GREEN:
-            print("Green light active. Press pedestrian button to start night cycle.")
-            result = wait_for_button_press()
-            if result == True:
+            if ped_pressed():
+                wait_for_release(PED_BUTTON)
+                print("Pedestrian button pressed. Waiting 3 seconds before YELLOW.")
+                result = print_countdown(NIGHT_PRE_YELLOW)
+                if result == "EMERGENCY":
+                    state = GREEN
+                    continue
+                if result == "NIGHT":
+                    toggle_night_mode()
+                    state = GREEN
+                    continue
                 state = YELLOW
-                state_start_time = time.time()
-            elif result == "NIGHT":
-                toggle_night_mode()
+            else:
+                time.sleep(0.05)
 
         elif state == YELLOW:
-            result = countdown(3, "YELLOW countdown")
+            print("YELLOW for 7 seconds")
+            result = print_countdown(NIGHT_YELLOW_TO_RED)
             if result == "EMERGENCY":
                 state = GREEN
-                state_start_time = time.time()
+            elif result == "NIGHT":
+                toggle_night_mode()
+                state = GREEN
             else:
                 state = RED
-                state_start_time = time.time()
 
         elif state == RED:
-            result = countdown(7, "RED countdown")
+            print("RED for 7 seconds")
+            result = print_countdown(NIGHT_RED_TO_GREEN)
             if result == "EMERGENCY":
                 state = GREEN
-                state_start_time = time.time()
+            elif result == "NIGHT":
+                toggle_night_mode()
+                state = GREEN
             else:
                 state = GREEN
-                state_start_time = time.time()
 
 try:
-    print("Starting traffic light state machine...")
-    print("GREEN = cars go, pedestrians don't walk")
-    print("YELLOW = cars go, pedestrians don't walk")
-    print("RED = cars don't go, pedestrians can walk")
-    print("Press NIGHT button to toggle night mode.")
-    print("Press EMERGENCY button anytime during red to force green.")
+    print("Traffic light system starting...")
+    print("Normal mode: Green stays on until button press.")
+    print("Night mode: Green stays on until button press.")
+    print("Emergency button forces GREEN any time.")
+    print("Night mode button toggles between modes.")
 
     while True:
         if night_mode:
-            run_night_mode()
+            night_mode_cycle()
         else:
-            run_normal_mode()
+            normal_mode()
 
 except KeyboardInterrupt:
     print("\nProgram stopped by user.")
 
 finally:
-    GPIO.output(GREEN_LED, GPIO.LOW)
-    GPIO.output(YELLOW_LED, GPIO.LOW)
-    GPIO.output(RED_LED, GPIO.LOW)
+    set_lights(GPIO.LOW, GPIO.LOW, GPIO.LOW)
     GPIO.cleanup()
